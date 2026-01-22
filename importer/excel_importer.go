@@ -29,8 +29,9 @@ type ExcelImportConfig[T any] struct {
 
 // ExcelImporter generic importer
 type ExcelImporter[T any] struct {
-	config       *ExcelImportConfig[T]
-	dynamicField string
+	config        *ExcelImportConfig[T]
+	dynamicField  string
+	dynamicFilter *regexp.Regexp
 }
 
 // NewExcelImporter creates a new importer instance
@@ -71,12 +72,24 @@ func (importer *ExcelImporter[T]) parseTags() {
 			continue
 		}
 
-		if tag == "*" || tag == "extra" {
+		parts := strings.Split(tag, ",")
+		head := strings.TrimSpace(parts[0])
+
+		if head == "*" || head == "extra" {
 			importer.dynamicField = field.Name
+			for _, part := range parts[1:] {
+				part = strings.TrimSpace(part)
+				if strings.HasPrefix(part, "pattern:") {
+					pattern := strings.TrimPrefix(part, "pattern:")
+					if regex, err := regexp.Compile(pattern); err == nil {
+						importer.dynamicFilter = regex
+					}
+				}
+			}
 			continue
 		}
 
-		importer.config.FieldMappings[tag] = field.Name
+		importer.config.FieldMappings[head] = field.Name
 	}
 }
 
@@ -380,6 +393,14 @@ func (importer *ExcelImporter[T]) fillStruct(val reflect.Value, row []string, co
 			if keyKind == reflect.String {
 				for colName, colIdx := range columnIndexMap {
 					if !usedColumns[colIdx] && colIdx < len(row) {
+						// Apply dynamic filter if set
+						if importer.dynamicFilter != nil {
+                            matched := importer.dynamicFilter.MatchString(colName)
+                            if !matched {
+							    continue
+                            }
+						}
+
 						cellVal := strings.TrimSpace(row[colIdx])
 						if cellVal != "" {
 							if elemKind == reflect.String {
