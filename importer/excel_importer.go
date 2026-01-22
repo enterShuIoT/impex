@@ -102,6 +102,122 @@ func (importer *ExcelImporter[T]) ImportLocal(filePath string) ([]T, error) {
 	return importer.importFromFile(f)
 }
 
+func (importer *ExcelImporter[T]) ImportStream(url string) <-chan ImportResult[T] {
+	ch := make(chan ImportResult[T])
+
+	go func() {
+		defer close(ch)
+
+		body, _, err := downloadFromUrl(url)
+		if err != nil {
+			ch <- ImportResult[T]{Error: fmt.Errorf("download failed: %v", err)}
+			return
+		}
+		
+		f, err := excelize.OpenReader(body)
+		if err != nil {
+			ch <- ImportResult[T]{Error: fmt.Errorf("open excel failed: %v", err)}
+			return
+		}
+		defer f.Close()
+
+		importer.streamRows(f, ch)
+	}()
+
+	return ch
+}
+
+func (importer *ExcelImporter[T]) ImportStreamLocal(filePath string) <-chan ImportResult[T] {
+	ch := make(chan ImportResult[T])
+
+	go func() {
+		defer close(ch)
+
+		f, err := excelize.OpenFile(filePath)
+		if err != nil {
+			ch <- ImportResult[T]{Error: fmt.Errorf("open excel failed: %v", err)}
+			return
+		}
+		defer f.Close()
+
+		importer.streamRows(f, ch)
+	}()
+
+	return ch
+}
+
+func (importer *ExcelImporter[T]) streamRows(f *excelize.File, ch chan<- ImportResult[T]) {
+	sheetName := importer.config.SheetName
+	if sheetName == "" {
+		if f.SheetCount < 1 {
+			ch <- ImportResult[T]{Error: fmt.Errorf("excel file has no sheets")}
+			return
+		}
+		sheetName = f.GetSheetName(0)
+	}
+
+	rows, err := f.Rows(sheetName)
+	if err != nil {
+		ch <- ImportResult[T]{Error: fmt.Errorf("read sheet failed: %v", err)}
+		return
+	}
+	defer rows.Close()
+
+	var columnIndexMap map[string]int
+	rowIndex := 0
+
+	for rows.Next() {
+		rowIndex++
+		
+		// Skip rows
+		if importer.config.SkipRows[rowIndex] {
+			continue
+		}
+
+		// Read row columns
+		row, err := rows.Columns()
+		if err != nil {
+			ch <- ImportResult[T]{RowIndex: rowIndex, Error: fmt.Errorf("read row %d failed: %v", rowIndex, err)}
+			return
+		}
+
+		// Handle Header
+		if rowIndex == importer.config.HeaderRow {
+			columnIndexMap = importer.buildColumnIndexMap(row)
+			
+			// Validate headers
+			missingColumns := make([]string, 0)
+			for excelCol := range importer.config.FieldMappings {
+				if _, exists := columnIndexMap[excelCol]; !exists {
+					missingColumns = append(missingColumns, excelCol)
+				}
+			}
+			if len(missingColumns) > 0 {
+				ch <- ImportResult[T]{RowIndex: rowIndex, Error: fmt.Errorf("missing columns: %s", strings.Join(missingColumns, ", "))}
+				return
+			}
+			continue
+		}
+
+		// Skip if before StartRow
+		if rowIndex < importer.config.StartRow {
+			continue
+		}
+
+		if importer.isEmptyRow(row) {
+			continue
+		}
+
+		instance, err := importer.parseRow(row, columnIndexMap)
+		if err != nil {
+			ch <- ImportResult[T]{RowIndex: rowIndex, Error: err}
+			continue // Continue processing other rows
+		}
+
+		ch <- ImportResult[T]{RowIndex: rowIndex, Data: instance}
+	}
+}
+
 func (importer *ExcelImporter[T]) importFromFile(f *excelize.File) ([]T, error) {
 	sheetName := importer.config.SheetName
 	if sheetName == "" {
@@ -145,35 +261,38 @@ func (importer *ExcelImporter[T]) importFromFile(f *excelize.File) ([]T, error) 
 			continue
 		}
 
-		var instance T
-		val := reflect.ValueOf(&instance)
-		if val.Kind() == reflect.Ptr {
-			val = val.Elem()
-		}
-		// If T is a pointer type, we need to initialize it?
-		// But T is typically a struct. If T is *Struct, then instance is *Struct (nil).
-		// We want to fill the struct.
-		// Let's assume T is Struct for simplicity as is common.
-		// If T is *Struct, we need to handle it.
-		if val.Kind() == reflect.Ptr {
-			if val.IsNil() {
-				val.Set(reflect.New(val.Type().Elem()))
-			}
-			val = val.Elem()
-		}
-
-		if err := importer.fillStruct(val, row, columnIndexMap, &instance); err != nil {
+		instance, err := importer.parseRow(row, columnIndexMap)
+		if err != nil {
 			return nil, fmt.Errorf("row %d error: %v", i+1, err)
-		}
-
-		if err := importer.validateData(val); err != nil {
-			return nil, fmt.Errorf("row %d validation error: %v", i+1, err)
 		}
 
 		result = append(result, instance)
 	}
 
 	return result, nil
+}
+
+func (importer *ExcelImporter[T]) parseRow(row []string, columnIndexMap map[string]int) (T, error) {
+	var instance T
+	val := reflect.ValueOf(&instance)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+	if val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			val.Set(reflect.New(val.Type().Elem()))
+		}
+		val = val.Elem()
+	}
+
+	if err := importer.fillStruct(val, row, columnIndexMap, &instance); err != nil {
+		return instance, err
+	}
+
+	if err := importer.validateData(val); err != nil {
+		return instance, err
+	}
+	return instance, nil
 }
 
 func (importer *ExcelImporter[T]) buildColumnIndexMap(headerRow []string) map[string]int {

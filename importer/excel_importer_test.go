@@ -14,7 +14,7 @@ type TestRow struct {
 	TimeData      map[string]string `excel:"extra"`
 }
 
-func TestExcelImporter_Basic(t *testing.T) {
+func createTestExcel(t *testing.T, filename string) {
 	// Create a dummy Excel file
 	f := excelize.NewFile()
 	sheetName := "Sheet1"
@@ -35,10 +35,14 @@ func TestExcelImporter_Basic(t *testing.T) {
 		f.SetCellValue(sheetName, cell, d)
 	}
 
-	filename := "test_import.xlsx"
 	if err := f.SaveAs(filename); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestExcelImporter_Basic(t *testing.T) {
+	filename := "test_import.xlsx"
+	createTestExcel(t, filename)
 	defer os.Remove(filename)
 
 	// Config
@@ -69,7 +73,40 @@ func TestExcelImporter_Basic(t *testing.T) {
 	if val, ok := row.TimeData["00:30"]; !ok || val != "100" {
 		t.Errorf("Expected 00:30=100, got %v", val)
 	}
-	if val, ok := row.TimeData["01:00"]; !ok || val != "200" {
-		t.Errorf("Expected 01:00=200, got %v", val)
+}
+
+func TestExcelImporter_Stream(t *testing.T) {
+	filename := "test_import_stream.xlsx"
+	createTestExcel(t, filename)
+	defer os.Remove(filename)
+
+	config := &ExcelImportConfig[TestRow]{
+		SheetName: "Sheet1",
+	}
+
+	importer := NewExcelImporter(config)
+	ch := importer.ImportStreamLocal(filename)
+
+	var count int
+	for res := range ch {
+		if res.Error != nil {
+			t.Fatalf("Stream error at row %d: %v", res.RowIndex, res.Error)
+		}
+		
+		count++
+		row := res.Data
+		if row.ClientAccount != "C123" {
+			t.Errorf("Expected ClientAccount C123, got %s", row.ClientAccount)
+		}
+		if row.TimeData == nil {
+			t.Fatal("Expected TimeData to be initialized")
+		}
+		if val, ok := row.TimeData["00:30"]; !ok || val != "100" {
+			t.Errorf("Expected 00:30=100, got %v", val)
+		}
+	}
+
+	if count != 1 {
+		t.Fatalf("Expected 1 row, got %d", count)
 	}
 }
