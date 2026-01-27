@@ -403,10 +403,39 @@ func (importer *ExcelImporter[T]) fillStruct(val reflect.Value, row []string, co
 
 						cellVal := strings.TrimSpace(row[colIdx])
 						if cellVal != "" {
-							if elemKind == reflect.String {
-								field.SetMapIndex(reflect.ValueOf(colName), reflect.ValueOf(cellVal))
-							} else if elemKind == reflect.Interface {
-								field.SetMapIndex(reflect.ValueOf(colName), reflect.ValueOf(cellVal))
+							var valToSet reflect.Value
+							var err error
+
+							switch elemKind {
+							case reflect.String:
+								valToSet = reflect.ValueOf(cellVal)
+							case reflect.Interface:
+								valToSet = reflect.ValueOf(cellVal)
+							case reflect.Float64, reflect.Float32:
+								if f, e := strconv.ParseFloat(cellVal, 64); e == nil {
+									valToSet = reflect.ValueOf(f).Convert(field.Type().Elem())
+								} else {
+									err = e
+								}
+							case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+								if i, e := strconv.ParseInt(cellVal, 10, 64); e == nil {
+									valToSet = reflect.ValueOf(i).Convert(field.Type().Elem())
+								} else {
+									err = e
+								}
+							case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+								if u, e := strconv.ParseUint(cellVal, 10, 64); e == nil {
+									valToSet = reflect.ValueOf(u).Convert(field.Type().Elem())
+								} else {
+									err = e
+								}
+							case reflect.Bool:
+								b := strings.ToLower(cellVal) == "true" || cellVal == "1" || cellVal == "是"
+								valToSet = reflect.ValueOf(b)
+							}
+
+							if err == nil && valToSet.IsValid() {
+								field.SetMapIndex(reflect.ValueOf(colName), valToSet)
 							}
 						}
 					}
